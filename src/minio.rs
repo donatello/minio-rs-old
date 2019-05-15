@@ -1,5 +1,9 @@
-use hyper::Uri;
+mod sign;
+
+use hyper::{Uri, header::HeaderMap, body::Body, Method};
 use std::{env, string::String};
+use std::collections::HashMap;
+use time::Tm;
 
 #[derive(Debug)]
 pub struct Credentials {
@@ -35,6 +39,7 @@ pub enum Err {
 #[derive(Debug)]
 pub struct Client {
     server: Uri,
+    region: Region,
     credentials: Option<Credentials>,
 }
 
@@ -49,6 +54,7 @@ impl Client{
             } else {
                 Ok(Client{
                     server: s,
+                    region: String::from(""),
                     credentials: None,
                 })
             },
@@ -60,11 +66,26 @@ impl Client{
         self.credentials = Some(credentials);
     }
 
+    pub fn set_region(&mut self, r: Region) {
+        self.region = r;
+    }
+
     pub fn get_play_client() -> Client {
         Client {
             server: "https://play.min.io:9000".parse::<Uri>().unwrap(),
+            region: String::from(""),
             credentials: Some(Credentials::new("Q3AM3UQ867SPQQA43P2F", "zuf+tfteSlswRu7BJ86wekitnifILbZam1KYY3TG")),
         }
     }
 
+}
+
+struct S3Req {
+    method: Method,
+    bucket: Option<String>,
+    object: Option<String>,
+    headers: HeaderMap,
+    query: HashMap<String, Option<String>>,
+    body: Body,
+    ts: Tm,
 }
