@@ -27,7 +27,7 @@ fn get_headers_to_sign(h: &HeaderMap) -> Vec<(String, String)> {
     let mut res: Vec<(String, String)> = h
         .iter()
         .map(|(x, y)| (x.clone(), y.clone()))
-        .filter(|(x, y)| !ignored_hdrs.contains(x))
+        .filter(|(x, _)| !ignored_hdrs.contains(x))
         .map(|(x, y)| {
             (
                 x.as_str().to_string(),
@@ -86,21 +86,18 @@ fn mk_path(r: &minio::S3Req) -> String {
     res
 }
 
-fn get_canonical_request(r: &minio::S3Req, extra_hdrs: Vec<(HeaderName, HeaderValue)>) -> String {
-    let mut hmap = r.headers.clone();
-    extra_hdrs.iter().for_each(|(x, y)| {
-        hmap.insert(x, y.clone());
-    });
-
-    let hs = get_headers_to_sign(&hmap);
+fn get_canonical_request(
+    r: &minio::S3Req,
+    hdrs_to_use: &Vec<(String, String)>,
+    signed_hdrs_str: &str,
+) -> String {
     let path_str = mk_path(r);
     let canonical_qstr = get_canonical_querystr(&r.query);
-    let canonical_hdrs: String = hs.iter().map(|(x, y)| format!("{}:{}\n", x, y)).collect();
-    let signed_hdrs = hs
+    let canonical_hdrs: String = hdrs_to_use
         .iter()
-        .map(|(x, _)| x.clone())
-        .collect::<Vec<String>>()
-        .join(";");
+        .map(|(x, y)| format!("{}:{}\n", x.clone(), y.clone()))
+        .collect();
+
     // FIXME: using only unsigned payload for now - need to add
     // hashing of payload.
     let payload_hash_str = String::from("UNSIGNED-PAYLOAD");
@@ -109,7 +106,7 @@ fn get_canonical_request(r: &minio::S3Req, extra_hdrs: Vec<(HeaderName, HeaderVa
         uri_encode_str(&path_str, false),
         canonical_qstr,
         canonical_hdrs,
-        signed_hdrs,
+        signed_hdrs_str.to_string(),
         payload_hash_str,
     ];
     res.join("\n")
@@ -151,32 +148,31 @@ fn compute_sign(str_to_sign: &str, key: &Vec<u8>) -> String {
 }
 
 pub fn sign_v4(r: &minio::S3Req, c: &minio::Client) -> Option<Vec<(HeaderName, HeaderValue)>> {
-    c.credentials.map(|creds| {
+    let creds = c.credentials.clone();
+    creds.map(|creds| {
         let scope = mk_scope(&r.ts, &c.region);
         let date_hdr = (
             HeaderName::from_static("x-amz-date"),
             HeaderValue::from_str(&aws_format_time(&r.ts)).unwrap(),
         );
-
-        let cr = get_canonical_request(r, vec![date_hdr]);
+        let mut hmap = r.headers.clone();
+        hmap.insert(date_hdr.0.clone(), date_hdr.1.clone());
+        let hs = get_headers_to_sign(&hmap);
+        let signed_hdrs_str: String = hs
+            .iter()
+            .map(|(x, _)| x.clone())
+            .collect::<Vec<String>>()
+            .join(";");
+        let cr = get_canonical_request(r, &hs, &signed_hdrs_str);
         let s2s = string_to_sign(&r.ts, &scope, &cr);
-        let skey = get_signing_key(
-            &r.ts,
-            &c.region,
-            &creds.secret_key
-        );
+        let skey = get_signing_key(&r.ts, &c.region, &creds.secret_key);
         let signature = compute_sign(&s2s, &skey);
 
         let auth_hdr_val = format!(
             "AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}",
-            &creds.access_key,
-            &scope,
-            &signed_hdrs_str,
-            &signature,
+            &creds.access_key, &scope, &signed_hdrs_str, &signature,
         );
-        let auth_hdr = (
-            AUTHORIZATION,
-            HeaderValue::from_str(&auth_hdr_val).unwrap(),
-        );
-    }
+        let auth_hdr = (AUTHORIZATION, HeaderValue::from_str(&auth_hdr_val).unwrap());
+        vec![auth_hdr, date_hdr]
+    })
 }
