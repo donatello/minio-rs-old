@@ -1,6 +1,7 @@
 use hyper::header::{
     HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, USER_AGENT,
 };
+use ring::{digest, hmac};
 use std::collections::{HashMap, HashSet};
 use time::Tm;
 
@@ -85,12 +86,13 @@ fn mk_path(r: &minio::S3Req) -> String {
     res
 }
 
-fn get_canonical_request(r: &mut minio::S3Req) -> String {
-    let v = aws_format_time(&r.ts);
-    r.headers
-        .insert("x-amz-date", HeaderValue::from_str(&v[..]).unwrap());
+fn get_canonical_request(r: &minio::S3Req, extra_hdrs: Vec<(HeaderName, HeaderValue)>) -> String {
+    let mut hmap = r.headers.clone();
+    extra_hdrs.iter().for_each(|(x, y)| {
+        hmap.insert(x, y.clone());
+    });
 
-    let hs = get_headers_to_sign(&r.headers);
+    let hs = get_headers_to_sign(&hmap);
     let path_str = mk_path(r);
     let canonical_qstr = get_canonical_querystr(&r.query);
     let canonical_hdrs: String = hs.iter().map(|(x, y)| format!("{}:{}\n", x, y)).collect();
@@ -111,4 +113,70 @@ fn get_canonical_request(r: &mut minio::S3Req) -> String {
         payload_hash_str,
     ];
     res.join("\n")
+}
+
+fn string_to_sign(ts: &Tm, scope: &str, canonical_request: &str) -> String {
+    let sha256_digest: String = digest::digest(&digest::SHA256, canonical_request.as_bytes())
+        .as_ref()
+        .iter()
+        .map(|x| format!("{:X}", x))
+        .collect();
+    vec![
+        "AWS4-HMAC-SHA256",
+        &aws_format_time(&ts),
+        scope,
+        &sha256_digest,
+    ]
+    .join("\n")
+}
+
+fn hmac_sha256(msg: &str, key: &[u8]) -> hmac::Signature {
+    let key = hmac::SigningKey::new(&digest::SHA256, key);
+    hmac::sign(&key, msg.as_bytes())
+}
+
+fn get_signing_key(ts: &Tm, region: &str, secret_key: &str) -> Vec<u8> {
+    let kstr = format!("AWS4{}", secret_key);
+    let s1 = hmac_sha256(&aws_format_time(&ts), kstr.as_bytes());
+    let s2 = hmac_sha256(&region, s1.as_ref());
+    let s3 = hmac_sha256("s3", s2.as_ref());
+    let s4 = hmac_sha256("aws4_request", s3.as_ref());
+    // FIXME: can this be done better?
+    s4.as_ref().iter().map(|x| x.clone()).collect()
+}
+
+fn compute_sign(str_to_sign: &str, key: &Vec<u8>) -> String {
+    let s1 = hmac_sha256(&str_to_sign, key.as_slice());
+    s1.as_ref().iter().map(|x| format!("{:X}", x)).collect()
+}
+
+pub fn sign_v4(r: &minio::S3Req, c: &minio::Client) -> Option<Vec<(HeaderName, HeaderValue)>> {
+    c.credentials.map(|creds| {
+        let scope = mk_scope(&r.ts, &c.region);
+        let date_hdr = (
+            HeaderName::from_static("x-amz-date"),
+            HeaderValue::from_str(&aws_format_time(&r.ts)).unwrap(),
+        );
+
+        let cr = get_canonical_request(r, vec![date_hdr]);
+        let s2s = string_to_sign(&r.ts, &scope, &cr);
+        let skey = get_signing_key(
+            &r.ts,
+            &c.region,
+            &creds.secret_key
+        );
+        let signature = compute_sign(&s2s, &skey);
+
+        let auth_hdr_val = format!(
+            "AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}",
+            &creds.access_key,
+            &scope,
+            &signed_hdrs_str,
+            &signature,
+        );
+        let auth_hdr = (
+            AUTHORIZATION,
+            HeaderValue::from_str(&auth_hdr_val).unwrap(),
+        );
+    }
 }
