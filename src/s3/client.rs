@@ -200,18 +200,18 @@ fn parse_list_objects_common_prefixes(
     Ok(())
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct Client<'a> {
+#[derive(Debug, Default)]
+pub struct Client {
     client: reqwest::Client,
     base_url: BaseUrl,
-    provider: Option<&'a (dyn Provider + Send + Sync)>,
+    provider: Option<Box<(dyn Provider + Send + Sync + 'static)>>,
     region_map: DashMap<String, String>,
 }
 
-impl<'a> Client<'a> {
+impl Client {
     pub fn new(
         base_url: BaseUrl,
-        provider: Option<&(dyn Provider + Send + Sync)>,
+        provider: Option<Box<(dyn Provider + Send + Sync + 'static)>>,
         ssl_cert_file: Option<String>,
         ignore_cert_check: Option<bool>,
     ) -> Result<Client, Error> {
@@ -295,7 +295,7 @@ impl<'a> Client<'a> {
         let date = utc_now();
         headers.insert(String::from("x-amz-date"), to_amz_date(date));
 
-        if let Some(p) = self.provider {
+        if let Some(p) = &self.provider {
             let creds = p.fetch();
             if creds.session_token.is_some() {
                 headers.insert(
@@ -773,7 +773,7 @@ impl<'a> Client<'a> {
         })
     }
 
-    async fn calculate_part_count(
+    async fn calculate_part_count<'a>(
         &self,
         sources: &'a mut Vec<ComposeSource<'_>>,
     ) -> Result<u16, Error> {
@@ -2180,7 +2180,7 @@ impl<'a> Client<'a> {
             Some(args.object),
         )?;
 
-        if let Some(p) = self.provider {
+        if let Some(p) = &self.provider {
             let creds = p.fetch();
             if let Some(t) = creds.session_token {
                 query_params.insert(String::from("X-Amz-Security-Token"), t);
@@ -2226,7 +2226,7 @@ impl<'a> Client<'a> {
         }
 
         let region = self.get_region(policy.bucket, policy.region).await?;
-        let creds = self.provider.unwrap().fetch();
+        let creds = self.provider.as_ref().unwrap().fetch();
         policy.form_data(
             creds.access_key,
             creds.secret_key,
